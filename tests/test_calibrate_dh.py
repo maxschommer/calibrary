@@ -27,6 +27,8 @@ class TestCalibrateDh(unittest.TestCase):
         self.assertTrue(np.allclose(tmat_zero_target, trans_mats[0]))
 
     def test_optimize_dh(self):
+        """Test that optimizing a set of DH parameters works.
+        """
         dh_truth = dh_params.copy()
         dh_adj = dh_truth.copy()
         ang_rand_mag = 0.1

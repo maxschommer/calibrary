@@ -1,16 +1,28 @@
 import time
-from typing import List
+from typing import List, Tuple
 from numba import njit
 import numpy as np
-import jax
-import jax.numpy as jnp
-from jax import grad, hessian, jit
 
 from scipy.optimize import minimize
 
 
 @njit(cache=True)
-def dh_to_trans_mats(dh_params: np.ndarray):
+def dh_to_trans_mats(dh_params: np.ndarray) -> np.ndarray:
+    """Convert Denavit–Hartenberg parameters into relative transformation
+    matrices.
+
+    Args:
+        dh_params (np.ndarray): An #Nx4 array of DH parameters, which are
+            expected to have rows which correspond to the joints, and columns
+            which correspond to:
+                theta offsets: angle about previous z, from old x to new x
+                a: length of the common normal
+                alpha: angle about common normal, from old z axis to new z axis
+                d: offset along previous z to the common normal
+
+    Returns:
+        np.ndarray: [description]
+    """
     theta = dh_params[:, 0]
     a = dh_params[:, 1]
     alpha = dh_params[:, 2]
@@ -40,49 +52,17 @@ def dh_to_trans_mats(dh_params: np.ndarray):
     return res_mats
 
 
-@jit
-def dh_to_trans_mats_jax(dh_params: jnp.ndarray):
-    theta = dh_params[:, 0]
-    a = dh_params[:, 1]
-    alpha = dh_params[:, 2]
-    d = dh_params[:, 3]
-    res_mats = jnp.zeros((dh_params.shape[0], 4, 4))
+def arr_multiply_accumulate(arr: np.ndarray, axis: int = 0) -> np.ndarray:
+    """Performs a matrix multiply accumulate along an axis.
 
-    # Fill row 0
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 0, 0], jnp.cos(theta))
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 0, 1], -jnp.sin(theta) * jnp.cos(theta))
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 0, 2], jnp.sin(theta) * jnp.sin(alpha))
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 0, 3], a * jnp.cos(theta))
+    Args:
+        arr (np.ndarray): An #Nx#Mx#M array to multiply the elements along the
+            zeroth axis along and accumulate the result.
+        axis (int): The axis to multiply and accumulate along.
 
-    # Fill row 1
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 1, 0], jnp.sin(theta))
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 1, 1], jnp.cos(theta) * jnp.cos(alpha))
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 1, 2], -jnp.cos(theta) * jnp.sin(alpha))
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 1, 3], a * jnp.sin(theta))
-
-    # Fill row 2
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 2, 1], jnp.sin(alpha))
-    res_mats = jax.ops.index_update(
-        res_mats, jax.ops.index[:, 2, 2], jnp.cos(alpha))
-    res_mats = jax.ops.index_update(res_mats, jax.ops.index[:, 2, 3], d)
-
-    # Identity row 3
-
-    res_mats = jax.ops.index_update(res_mats, jax.ops.index[:, 3, 3], 1)
-
-    return res_mats
-
-
-def arr_multiply_accumulate(arr: np.ndarray, axis=0):
+    Returns:
+        np.ndarray: An #Nx#Mx#M array of multiplied and accumulated matrices.
+    """
     arr_roll = np.moveaxis(arr, axis, 0)
     res = np.zeros_like(arr_roll)
     for i, arr_slice in enumerate(arr_roll):
@@ -94,7 +74,17 @@ def arr_multiply_accumulate(arr: np.ndarray, axis=0):
 
 
 @njit(cache=True)
-def arr_multiply_accumulate_numba(arr: np.ndarray):
+def arr_multiply_accumulate_numba(arr: np.ndarray) -> np.ndarray:
+    """Performs a matrix multiply accumulate along the zeroth axis, accelerated
+    by Numba.
+
+    Args:
+        arr (np.ndarray): An #Nx#Mx#M array to multiply the elements along the
+            zeroth axis along and accumulate the result.
+
+    Returns:
+        np.ndarray: An #Nx#Mx#M array of multiplied and accumulated matrices.
+    """
     res = np.zeros_like(arr)
     for i, arr_slice in enumerate(arr):
         if i != 0:
@@ -102,17 +92,6 @@ def arr_multiply_accumulate_numba(arr: np.ndarray):
         else:
             res[i] = arr_slice
     return res
-
-
-def arr_multiply_accumulate_jax(arr: jnp.ndarray, axis=0):
-    arr_roll = jnp.moveaxis(arr, axis, 0)
-    res: List[jnp.array] = []
-    for i, arr_slice in enumerate(arr_roll):
-        if i != 0:
-            res.append(jnp.matmul(res[i - 1], arr_slice))
-        else:
-            res.append(arr_slice)
-    return jnp.stack(res, axis)
 
 
 @njit(cache=True)
@@ -133,28 +112,25 @@ def _optimize_dh_error(dh_params_proposed: np.ndarray,
     return np.sum(np.array(error))
 
 
-def _optimize_dh_error_jax(dh_params_proposed: jnp.ndarray,
-                           end_effector_poses: jnp.ndarray,
-                           joint_angles: jnp.ndarray) -> float:
-    # Dh parameters come in as a flat array
-    dh_params_proposed = jnp.reshape(dh_params_proposed, (-1, 4))
-    error = []
-    for js, ee_pose in zip(joint_angles, end_effector_poses):
-        full_dh_params = jax.ops.index_update(
-            dh_params_proposed, jax.ops.index[:, 0], dh_params_proposed[:, 0] + js)
-
-        joint_mats = dh_to_trans_mats_jax(full_dh_params)
-        ee = arr_multiply_accumulate_jax(
-            joint_mats, 0)[-1]
-        error.append(jnp.sum((ee - ee_pose)**2))
-
-    return sum(error)
-
-
 def optimize_dh(joint_angles: np.ndarray,
                 dh_params: np.ndarray,
-                end_effector_poses: np.ndarray):
+                end_effector_poses: np.ndarray) -> Tuple[np.ndarray, float]:
+    """Optimize a set of initial DH parameters given an observed set of end
+    effector poses and the associated joint angles.
 
+    Args:
+        joint_angles (np.ndarray): An #Nx#M array of joint angles, where there
+            are #N sample poses, and #M joints.
+        dh_params (np.ndarray): An #Mx4 array of DH parameters representing the
+            arm.
+        end_effector_poses (np.ndarray): An #Nx4x4 array of transformation
+            matrices representing the end effector poses (observed).
+
+    Returns:
+        Tuple[np.ndarray, float]: A tuple comprising:
+            (np.ndarray): An #Mx4 array of optimized DH parameters
+            (float): The resulting error function after optimization.
+    """
     def error_func(dh_proposed):
         return _optimize_dh_error(dh_proposed,
                                   end_effector_poses,
