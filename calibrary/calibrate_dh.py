@@ -21,7 +21,7 @@ def dh_to_trans_mats(dh_params: np.ndarray) -> np.ndarray:
                 d: offset along previous z to the common normal
 
     Returns:
-        np.ndarray: [description]
+        np.ndarray: An #Nx4x4 array of transformation matrices.
     """
     theta = dh_params[:, 0]
     a = dh_params[:, 1]
